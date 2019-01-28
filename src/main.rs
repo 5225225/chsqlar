@@ -1,9 +1,10 @@
+use cdchunking::{Chunker, ZPAQ};
 use std::collections::HashMap;
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
+use rusqlite::{Connection, NO_PARAMS};
 
 trait Archive {
-    fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>>;
     fn get_chunk(&self, hash: &str) -> Vec<u8>;
     fn put_chunk(&mut self, data: Vec<u8>) -> String;
     fn get_file(&self, name: &str) -> File;
@@ -29,6 +30,18 @@ trait Archive {
         let f = self.get_file(name);
 
         f.chunks.iter().flat_map(|hash| self.get_chunk(hash)).collect()
+    }
+
+    fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>> {
+        let chunker = Chunker::new(ZPAQ::new(13)); 
+
+        let mut chunks = Vec::new();
+
+        for chunk in chunker.slices(&data) {
+            chunks.push(chunk.to_owned());
+        }
+
+        chunks
     }
 }
 
@@ -56,12 +69,6 @@ impl MemoryDatabase {
 }
 
 impl Archive for MemoryDatabase {
-    fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>> {
-        let mut chunk = Vec::new();
-        chunk.push(data);
-        chunk
-    }
-
     fn get_chunk(&self, hash: &str) -> Vec<u8> {
         self.chunks[hash].clone()
     }
@@ -97,23 +104,48 @@ impl Archive for MemoryDatabase {
     }
 }
 
+struct SqliteDatabase {
+    connection: Connection,
+}
+
+impl SqliteDatabase {
+    fn new(fname: &str) -> Self {
+        let connection = Connection::open(fname).unwrap();
+
+        connection.execute("CREATE TABLE IF NOT EXISTS
+            files (
+                name TEXT PRIMARY KEY,
+                mode INT,
+                mtime INT,
+                sz INT,
+                chunks BLOB
+            );
+        ", NO_PARAMS).unwrap();
+
+        connection.execute("CREATE TABLE IF NOT EXISTS
+            chunks (
+                hash BLOB,
+                data BLOB
+            );
+        ", NO_PARAMS).unwrap();
+
+        SqliteDatabase {
+            connection,
+        }
+    }
+}
+
+impl Archive for SqliteDatabase {
+    fn get_chunk(&self, hash: &str) -> Vec<u8> {}
+    fn put_chunk(&mut self, data: Vec<u8>) -> String{}
+    fn get_file(&self, name: &str) -> File
+    {}
+    fn put_file(&mut self, file: File)
+{}
+fn list_files(&self) -> Vec<String>
+{}
+}
+
 fn main() {
-    let mut db = MemoryDatabase::new();
-
-    let f = File {
-        chunks: Vec::new(),
-        mode: 0o755,
-        mtime: 0,
-        name: "Empty.txt".to_string(),
-        size: 0,
-    };
-
-    db.put_file(f);
-
-    db.put_file_data("Empty.txt", vec![1,3,3,7]);
-
-    let f = db.get_file("Empty.txt");
-
-    println!("{:?}", f);
-
+    let db = SqliteDatabase::new("files.db");
 }
