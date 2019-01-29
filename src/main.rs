@@ -7,6 +7,7 @@ use rusqlite::types::ToSql;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use zstd::{encode_all, decode_all};
 
 trait Archive {
     fn get_chunk(&self, hash: &str) -> Vec<u8>;
@@ -142,7 +143,7 @@ impl SqliteDatabase {
             .execute(
                 "CREATE TABLE IF NOT EXISTS
             chunks (
-                hash BLOB,
+                hash BLOB PRIMARY KEY,
                 data BLOB
             );
         ",
@@ -156,10 +157,13 @@ impl SqliteDatabase {
 
 impl Archive for SqliteDatabase {
     fn get_chunk(&self, hash: &str) -> Vec<u8> {
-        self.connection.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| row.get(0)).unwrap()
+        let data: Vec<u8> = self.connection.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| row.get(0)).unwrap();
+
+        decode_all(&*data).unwrap()
     }
     fn put_chunk(&mut self, hash: String, data: Vec<u8>) {
-        self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &data as &ToSql]).unwrap();
+        let compressed = encode_all(&*data, 0).unwrap();
+        self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &compressed as &ToSql]).unwrap();
     }
     fn get_file(&self, name: &str) -> File {
         let size: i64;
