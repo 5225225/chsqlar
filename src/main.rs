@@ -8,6 +8,32 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use zstd::{encode_all, decode_all};
+use structopt::StructOpt;
+
+
+#[derive(StructOpt, Debug)]
+struct Opt {
+    #[structopt(flatten)]
+    opt: CommonOpt,
+
+    #[structopt(subcommand)]
+    cmd: OptCommand,
+}
+
+#[derive(StructOpt, Debug)]
+struct CommonOpt {
+    database: String,
+    #[structopt(short = "v", parse(from_occurrences))]
+    verbosity: u8,
+}
+
+#[derive(StructOpt, Debug)]
+enum OptCommand {
+    Add {
+        files: Vec<String>
+    },
+    List,
+}
 
 trait Archive {
     fn get_chunk(&self, hash: &str) -> Vec<u8>;
@@ -164,43 +190,47 @@ impl Archive for SqliteDatabase {
     }
 }
 
+fn list_cmd(db: &Archive) {
+    let files = db.list_files();
+
+    for file in files {
+        println!("{}", file);
+    }
+}
+
+fn add_file(db: &mut Archive, fname: String) {
+    let mut buf = Vec::new();
+    fs::File::open(&fname).unwrap().read_to_end(&mut buf).unwrap();
+    let metadata = fs::metadata(&fname).unwrap();
+
+    let f = File {
+        name: fname.clone(),
+        size: metadata.len() as i64,
+        chunks: Vec::new(),
+    };
+
+    db.put_file(f);
+
+    db.put_file_data(&fname, buf);
+}
+
+fn add_files_cmd(db: &mut Archive, files: Vec<String>) {
+    for file in files {
+        add_file(db, file);
+    }
+}
+
 fn main() {
-    let args: Vec<_> = env::args().collect();
+    let app = Opt::from_args();
 
-    let mut db = SqliteDatabase::new("files.db");
+    let mut db = SqliteDatabase::new(&app.opt.database);
 
-    match &*args[1] {
-        "put" => {
-            let fname = &args[2];
-            let mut buf = Vec::new();
-            fs::File::open(fname).unwrap().read_to_end(&mut buf).unwrap();
-            let metadata = fs::metadata(fname).unwrap();
-
-            let f = File {
-                name: fname.clone(),
-                size: metadata.len() as i64,
-                chunks: Vec::new(),
-            };
-
-            db.put_file(f);
-
-            db.put_file_data(&fname, buf);
-        }
-        "get" => {
-            let fname = &args[2];
-            
-            let data = db.get_file_data(&fname);
-            let mut f = fs::File::create(fname).unwrap();
-
-            f.write_all(&data);
-        }
-        "ls" => {
-            let files = db.list_files();
-
-            for file in files {
-                println!("{}", file);
-            }
-        }
-        _ => {}
+    match app.cmd {
+        OptCommand::List => {
+            list_cmd(&db);
+        },
+        OptCommand::Add{files} => {
+            add_files_cmd(&mut db, files);
+        },
     }
 }
