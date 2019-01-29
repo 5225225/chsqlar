@@ -76,48 +76,6 @@ struct File {
     chunks: Vec<String>,
 }
 
-struct MemoryDatabase {
-    files: HashMap<String, File>,
-    chunks: HashMap<String, Vec<u8>>,
-}
-
-impl MemoryDatabase {
-    fn new() -> Self {
-        MemoryDatabase {
-            files: HashMap::new(),
-            chunks: HashMap::new(),
-        }
-    }
-}
-
-impl Archive for MemoryDatabase {
-    fn get_chunk(&self, hash: &str) -> Vec<u8> {
-        self.chunks[hash].clone()
-    }
-
-    fn put_chunk(&mut self, hash: String, data: Vec<u8>) {
-        self.chunks.insert(hash, data);
-    }
-
-    fn get_file(&self, name: &str) -> File {
-        self.files[name].clone()
-    }
-
-    fn put_file(&mut self, file: File) {
-        self.files.insert(file.name.clone(), file);
-    }
-
-    fn list_files(&self) -> Vec<String> {
-        let mut result = Vec::new();
-
-        for key in self.files.keys() {
-            result.push(key.clone());
-        }
-
-        result
-    }
-}
-
 struct SqliteDatabase {
     connection: Connection,
 }
