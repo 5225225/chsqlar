@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use zstd::{encode_all, decode_all};
 use structopt::StructOpt;
+use std::path::{Path, PathBuf};
 
 
 #[derive(StructOpt, Debug)]
@@ -214,8 +215,37 @@ fn add_file(db: &mut Archive, fname: String) {
     db.put_file_data(&fname, buf);
 }
 
+fn resolve_files(file: String) -> Vec<String> {
+    let mut result = Vec::new();
+
+    let meta = fs::metadata(&file).unwrap();
+
+    if meta.is_file() {
+        result.push(file);
+    } else if meta.is_dir() {
+        let files: Vec<_> = fs::read_dir(&file)
+            .unwrap()
+            .map(|x| x.unwrap().path())
+            .collect();
+
+        for f in files {
+            let mut pathbuf = PathBuf::new();
+            pathbuf.push(&file);
+            pathbuf.push(f);
+            let resolved_files = resolve_files(pathbuf.to_str().unwrap().to_string());
+            for resolved in resolved_files {
+                result.push(resolved);
+            }
+        }
+    } else {
+        unimplemented!("Unknown file type");
+    }
+
+    result
+}
+
 fn add_files_cmd(db: &mut Archive, files: Vec<String>) {
-    for file in files {
+    for file in files.into_iter().flat_map(resolve_files) {
         add_file(db, file);
     }
 }
