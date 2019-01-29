@@ -2,14 +2,13 @@ use cdchunking::{Chunker, ZPAQ};
 use crypto::digest::Digest;
 use crypto::sha3::Sha3;
 use rusqlite::{Connection, NO_PARAMS};
-use std::collections::HashMap;
 use rusqlite::types::ToSql;
-use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use zstd::{encode_all, decode_all};
 use structopt::StructOpt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use failure::Error;
 
 
 #[derive(StructOpt, Debug)]
@@ -37,34 +36,40 @@ enum OptCommand {
 }
 
 trait Archive {
-    fn get_chunk(&self, hash: &str) -> Vec<u8>;
-    fn put_chunk(&mut self, hash: String, data: Vec<u8>);
-    fn get_file(&self, name: &str) -> File;
-    fn put_file(&mut self, file: File);
-    fn list_files(&self) -> Vec<String>;
+    fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error>;
+    fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error>;
+    fn get_file(&self, name: &str) -> Result<File, Error>;
+    fn put_file(&mut self, file: File) -> Result<(), Error>;
+    fn list_files(&self) -> Result<Vec<String>, Error>;
 
-    fn put_file_data(&mut self, name: &str, data: Vec<u8>) {
-        let mut f = self.get_file(name);
+    fn put_file_data(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+        let mut f = self.get_file(name)?;
 
         let mut chunks = Vec::new();
 
         for chunk in self.chunk_data(data) {
-            let hash = self.put_hash_chunk(chunk);
+            let hash = self.put_hash_chunk(chunk)?;
             chunks.push(hash);
         }
 
         f.chunks = chunks;
 
-        self.put_file(f);
+        self.put_file(f)?;
+
+        Ok(())
     }
 
-    fn get_file_data(&mut self, name: &str) -> Vec<u8> {
-        let f = self.get_file(name);
+    fn get_file_data(&mut self, name: &str) -> Result<Vec<u8>, Error> {
+        let f = self.get_file(name)?;
+        
+        let mut result = Vec::new();
 
-        f.chunks
-            .iter()
-            .flat_map(|hash| self.get_chunk(hash))
-            .collect()
+        for hash in f.chunks {
+            let chunk = self.get_chunk(&hash)?;
+            result.extend_from_slice(&chunk);
+        }
+
+        Ok(result)
     }
 
     fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>> {
@@ -87,12 +92,12 @@ trait Archive {
         hasher.result_str()
     }
 
-    fn put_hash_chunk(&mut self, data: Vec<u8>) -> String {
+    fn put_hash_chunk(&mut self, data: Vec<u8>) -> Result<String, Error> {
         let hash = self.hash_chunk(&data);
 
-        self.put_chunk(hash.clone(), data);
+        self.put_chunk(hash.clone(), data)?;
 
-        hash
+        Ok(hash)
     }
 }
 
@@ -108,8 +113,8 @@ struct SqliteDatabase {
 }
 
 impl SqliteDatabase {
-    fn new(fname: &str) -> Self {
-        let connection = Connection::open(fname).unwrap();
+    fn new(fname: &str) -> Result<Self, Error> {
+        let connection = Connection::open(fname)?;
 
         connection
             .execute(
@@ -121,8 +126,8 @@ impl SqliteDatabase {
             );
         ",
                 NO_PARAMS,
-            )
-            .unwrap();
+            )?
+            ;
 
         connection
             .execute(
@@ -133,76 +138,81 @@ impl SqliteDatabase {
             );
         ",
                 NO_PARAMS,
-            )
-            .unwrap();
+            )?;
+            
 
-        SqliteDatabase { connection }
+        Ok(SqliteDatabase { connection })
     }
 }
 
 impl Archive for SqliteDatabase {
-    fn get_chunk(&self, hash: &str) -> Vec<u8> {
-        let data: Vec<u8> = self.connection.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| row.get(0)).unwrap();
+    fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error> {
+        let data: Vec<u8> = self.connection.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| row.get(0))?;
 
-        decode_all(&*data).unwrap()
+        let decoded = decode_all(&*data)?;
+        Ok(decoded)
     }
-    fn put_chunk(&mut self, hash: String, data: Vec<u8>) {
-        let compressed = encode_all(&*data, 0).unwrap();
-        self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &compressed as &ToSql]).unwrap();
+    fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error> {
+        let compressed = encode_all(&*data, 0)?;
+        self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &compressed as &ToSql])?;
+        Ok(())
     }
-    fn get_file(&self, name: &str) -> File {
+    fn get_file(&self, name: &str) -> Result<File, Error> {
         let size: i64;
         let chunks: String;
 
         let result = self.connection.query_row(
         "SELECT size, chunks FROM files WHERE name=?", 
         &[&name], 
-        |row| (row.get(0), row.get(1)))
-        .unwrap();
+        |row| (row.get(0), row.get(1)))?;
 
         size = result.0;
         chunks = result.1;
 
         let chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
 
-        File {
+        Ok(File {
             name: name.to_string(),
             size,
             chunks: chunks_vec,
-        }
+        })
     }
-    fn put_file(&mut self, file: File) {
+    fn put_file(&mut self, file: File) -> Result<(), Error> {
         let chunks = file.chunks.join(";");
 
         self.connection.execute("INSERT OR REPLACE INTO files VALUES (?,?,?)", &[
             &file.name as &ToSql,
             &file.size,
             &chunks,
-        ]).unwrap();
+        ])?;
+
+        Ok(())
     }
 
-    fn list_files(&self) -> Vec<String> {
-        let mut stmt = self.connection.prepare("SELECT name FROM files").unwrap();
+    fn list_files(&self) -> Result<Vec<String>, Error> {
+        let mut stmt = self.connection.prepare("SELECT name FROM files")?;
         let mut results = Vec::new();
-        for name in stmt.query_map(NO_PARAMS, |row| row.get(0)).unwrap() {
-            results.push(name.unwrap());
+        for name in stmt.query_map(NO_PARAMS, |row| row.get(0))? {
+            results.push(name?);
         }
-        results
+        Ok(results)
     }
 }
 
-fn list_cmd(db: &Archive) {
-    let files = db.list_files();
+fn list_cmd(db: &Archive) -> Result<(), Error> {
+    let files = db.list_files()?;
 
     for file in files {
         println!("{}", file);
     }
+
+    Ok(())
 }
 
-fn add_file(db: &mut Archive, fname: String) {
+fn add_file(db: &mut Archive, fname: String) -> Result<(), Error> {
     let mut buf = Vec::new();
-    fs::File::open(&fname).unwrap().read_to_end(&mut buf).unwrap();
-    let metadata = fs::metadata(&fname).unwrap();
+    fs::File::open(&fname)?.read_to_end(&mut buf)?;
+    let metadata = fs::metadata(&fname)?;
 
     let f = File {
         name: fname.clone(),
@@ -210,21 +220,22 @@ fn add_file(db: &mut Archive, fname: String) {
         chunks: Vec::new(),
     };
 
-    db.put_file(f);
+    db.put_file(f)?;
 
-    db.put_file_data(&fname, buf);
+    db.put_file_data(&fname, buf)?;
+
+    Ok(())
 }
 
-fn resolve_files(file: String) -> Vec<String> {
+fn resolve_files(file: String) -> Result<Vec<String>, Error> {
     let mut result = Vec::new();
 
-    let meta = fs::metadata(&file).unwrap();
+    let meta = fs::metadata(&file)?;
 
     if meta.is_file() {
         result.push(file);
     } else if meta.is_dir() {
-        let files: Vec<_> = fs::read_dir(&file)
-            .unwrap()
+        let files: Vec<_> = fs::read_dir(&file)?
             .map(|x| x.unwrap().path())
             .collect();
 
@@ -232,7 +243,7 @@ fn resolve_files(file: String) -> Vec<String> {
             let mut pathbuf = PathBuf::new();
             pathbuf.push(&file);
             pathbuf.push(f);
-            let resolved_files = resolve_files(pathbuf.to_str().unwrap().to_string());
+            let resolved_files = resolve_files(pathbuf.to_str().unwrap().to_string())?;
             for resolved in resolved_files {
                 result.push(resolved);
             }
@@ -241,26 +252,33 @@ fn resolve_files(file: String) -> Vec<String> {
         unimplemented!("Unknown file type");
     }
 
-    result
+    Ok(result)
 }
 
-fn add_files_cmd(db: &mut Archive, files: Vec<String>) {
-    for file in files.into_iter().flat_map(resolve_files) {
-        add_file(db, file);
+fn add_files_cmd(db: &mut Archive, files: Vec<String>) -> Result<(), Error> {
+    for file in files.into_iter() {
+        let resolved = resolve_files(file)?;
+        for f in resolved {
+            add_file(db, f)?;
+        }
     }
+
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<(), Error> {
     let app = Opt::from_args();
 
-    let mut db = SqliteDatabase::new(&app.opt.database);
+    let mut db = SqliteDatabase::new(&app.opt.database)?;
 
     match app.cmd {
         OptCommand::List => {
-            list_cmd(&db);
+            list_cmd(&db)?;
         },
         OptCommand::Add{files} => {
-            add_files_cmd(&mut db, files);
+            add_files_cmd(&mut db, files)?;
         },
     }
+
+    Ok(())
 }
