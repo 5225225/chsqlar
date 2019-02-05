@@ -230,6 +230,8 @@ fn add_file(db: &mut Archive, fname: String) -> Result<(), Error> {
 fn resolve_files(file: String) -> Result<Vec<String>, Error> {
     let mut result = Vec::new();
 
+    let file = fs::canonicalize(file).unwrap().to_str().unwrap().to_string();
+
     let meta = fs::metadata(&file)?;
 
     if meta.is_file() {
