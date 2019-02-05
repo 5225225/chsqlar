@@ -73,7 +73,7 @@ trait Archive {
     }
 
     fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>> {
-        let chunker = Chunker::new(ZPAQ::new(13));
+        let chunker = Chunker::new(ZPAQ::new(20));
 
         let mut chunks = Vec::new();
 
