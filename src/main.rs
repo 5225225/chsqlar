@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Read;
 use zstd::{encode_all, decode_all};
 use structopt::StructOpt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use failure::Error;
 
 
@@ -30,7 +30,7 @@ struct CommonOpt {
 #[derive(StructOpt, Debug)]
 enum OptCommand {
     Add {
-        files: Vec<String>
+        files: Vec<PathBuf>
     },
     List,
 }
@@ -38,11 +38,11 @@ enum OptCommand {
 trait Archive {
     fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error>;
     fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error>;
-    fn get_file(&self, name: &str) -> Result<File, Error>;
+    fn get_file(&self, name: PathBuf) -> Result<File, Error>;
     fn put_file(&mut self, file: File) -> Result<(), Error>;
     fn list_files(&self) -> Result<Vec<String>, Error>;
 
-    fn put_file_data(&mut self, name: &str, data: Vec<u8>) -> Result<(), Error> {
+    fn put_file_data(&mut self, name: PathBuf, data: Vec<u8>) -> Result<(), Error> {
         let mut f = self.get_file(name)?;
 
         let mut chunks = Vec::new();
@@ -59,7 +59,7 @@ trait Archive {
         Ok(())
     }
 
-    fn get_file_data(&mut self, name: &str) -> Result<Vec<u8>, Error> {
+    fn get_file_data(&mut self, name: PathBuf) -> Result<Vec<u8>, Error> {
         let f = self.get_file(name)?;
         
         let mut result = Vec::new();
@@ -103,7 +103,7 @@ trait Archive {
 
 #[derive(Debug, Clone)]
 struct File {
-    name: String,
+    name: PathBuf,
     size: i64,
     chunks: Vec<String>,
 }
@@ -157,13 +157,13 @@ impl Archive for SqliteDatabase {
         self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &compressed as &ToSql])?;
         Ok(())
     }
-    fn get_file(&self, name: &str) -> Result<File, Error> {
+    fn get_file(&self, name: PathBuf) -> Result<File, Error> {
         let size: i64;
         let chunks: String;
 
         let result = self.connection.query_row(
         "SELECT size, chunks FROM files WHERE name=?", 
-        &[&name], 
+        &[&name.to_str().unwrap()], 
         |row| (row.get(0), row.get(1)))?;
 
         size = result.0;
@@ -172,7 +172,7 @@ impl Archive for SqliteDatabase {
         let chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
 
         Ok(File {
-            name: name.to_string(),
+            name,
             size,
             chunks: chunks_vec,
         })
@@ -181,7 +181,7 @@ impl Archive for SqliteDatabase {
         let chunks = file.chunks.join(";");
 
         self.connection.execute("INSERT OR REPLACE INTO files VALUES (?,?,?)", &[
-            &file.name as &ToSql,
+            &file.name.to_str().unwrap() as &ToSql,
             &file.size,
             &chunks,
         ])?;
@@ -209,7 +209,7 @@ fn list_cmd(db: &Archive) -> Result<(), Error> {
     Ok(())
 }
 
-fn add_file(db: &mut Archive, fname: String) -> Result<(), Error> {
+fn add_file(db: &mut Archive, fname: PathBuf) -> Result<(), Error> {
     let mut buf = Vec::new();
     fs::File::open(&fname)?.read_to_end(&mut buf)?;
     let metadata = fs::metadata(&fname)?;
@@ -222,15 +222,15 @@ fn add_file(db: &mut Archive, fname: String) -> Result<(), Error> {
 
     db.put_file(f)?;
 
-    db.put_file_data(&fname, buf)?;
+    db.put_file_data(fname, buf)?;
 
     Ok(())
 }
 
-fn resolve_files(file: String) -> Result<Vec<String>, Error> {
+fn resolve_files(file: PathBuf) -> Result<Vec<PathBuf>, Error> {
     let mut result = Vec::new();
 
-    let file = fs::canonicalize(file).unwrap().to_str().unwrap().to_string();
+    let file = fs::canonicalize(file)?;
 
     let meta = fs::metadata(&file)?;
 
@@ -245,7 +245,7 @@ fn resolve_files(file: String) -> Result<Vec<String>, Error> {
             let mut pathbuf = PathBuf::new();
             pathbuf.push(&file);
             pathbuf.push(f);
-            let resolved_files = resolve_files(pathbuf.to_str().unwrap().to_string())?;
+            let resolved_files = resolve_files(pathbuf)?;
             for resolved in resolved_files {
                 result.push(resolved);
             }
@@ -257,7 +257,7 @@ fn resolve_files(file: String) -> Result<Vec<String>, Error> {
     Ok(result)
 }
 
-fn add_files_cmd(db: &mut Archive, files: Vec<String>) -> Result<(), Error> {
+fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
     for file in files.into_iter() {
         let resolved = resolve_files(file)?;
         for f in resolved {
