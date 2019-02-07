@@ -1,15 +1,14 @@
 use cdchunking::{Chunker, ZPAQ};
 use crypto::digest::Digest;
 use crypto::sha3::Sha3;
-use rusqlite::{Connection, NO_PARAMS};
+use failure::Error;
 use rusqlite::types::ToSql;
+use rusqlite::{Connection, NO_PARAMS};
 use std::fs;
 use std::io::Read;
-use zstd::{encode_all, decode_all};
-use structopt::StructOpt;
 use std::path::{Path, PathBuf};
-use failure::Error;
-
+use structopt::StructOpt;
+use zstd::{decode_all, encode_all};
 
 #[derive(StructOpt, Debug)]
 struct Opt {
@@ -29,9 +28,7 @@ struct CommonOpt {
 
 #[derive(StructOpt, Debug)]
 enum OptCommand {
-    Add {
-        files: Vec<PathBuf>
-    },
+    Add { files: Vec<PathBuf> },
     List,
 }
 
@@ -61,7 +58,7 @@ trait Archive {
 
     fn get_file_data(&mut self, name: PathBuf) -> Result<Vec<u8>, Error> {
         let f = self.get_file(name)?;
-        
+
         let mut result = Vec::new();
 
         for hash in f.chunks {
@@ -116,30 +113,26 @@ impl SqliteDatabase {
     fn new(fname: &str) -> Result<Self, Error> {
         let connection = Connection::open(fname)?;
 
-        connection
-            .execute(
-                "CREATE TABLE IF NOT EXISTS
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS
             files (
                 name TEXT PRIMARY KEY,
                 size INT,
                 chunks BLOB
             );
         ",
-                NO_PARAMS,
-            )?
-            ;
+            NO_PARAMS,
+        )?;
 
-        connection
-            .execute(
-                "CREATE TABLE IF NOT EXISTS
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS
             chunks (
                 hash BLOB PRIMARY KEY,
                 data BLOB
             );
         ",
-                NO_PARAMS,
-            )?;
-            
+            NO_PARAMS,
+        )?;
 
         Ok(SqliteDatabase { connection })
     }
@@ -147,14 +140,21 @@ impl SqliteDatabase {
 
 impl Archive for SqliteDatabase {
     fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error> {
-        let data: Vec<u8> = self.connection.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| row.get(0))?;
+        let data: Vec<u8> =
+            self.connection
+                .query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| {
+                    row.get(0)
+                })?;
 
         let decoded = decode_all(&*data)?;
         Ok(decoded)
     }
     fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error> {
         let compressed = encode_all(&*data, 0)?;
-        self.connection.execute("INSERT OR IGNORE INTO chunks VALUES (?,?)", &[&hash, &compressed as &ToSql])?;
+        self.connection.execute(
+            "INSERT OR IGNORE INTO chunks VALUES (?,?)",
+            &[&hash, &compressed as &ToSql],
+        )?;
         Ok(())
     }
     fn get_file(&self, name: PathBuf) -> Result<File, Error> {
@@ -162,9 +162,10 @@ impl Archive for SqliteDatabase {
         let chunks: String;
 
         let result = self.connection.query_row(
-        "SELECT size, chunks FROM files WHERE name=?", 
-        &[&name.to_str().unwrap()], 
-        |row| (row.get(0), row.get(1)))?;
+            "SELECT size, chunks FROM files WHERE name=?",
+            &[&name.to_str().unwrap()],
+            |row| (row.get(0), row.get(1)),
+        )?;
 
         size = result.0;
         chunks = result.1;
@@ -180,11 +181,10 @@ impl Archive for SqliteDatabase {
     fn put_file(&mut self, file: File) -> Result<(), Error> {
         let chunks = file.chunks.join(";");
 
-        self.connection.execute("INSERT OR REPLACE INTO files VALUES (?,?,?)", &[
-            &file.name.to_str().unwrap() as &ToSql,
-            &file.size,
-            &chunks,
-        ])?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO files VALUES (?,?,?)",
+            &[&file.name.to_str().unwrap() as &ToSql, &file.size, &chunks],
+        )?;
 
         Ok(())
     }
@@ -237,9 +237,7 @@ fn resolve_files(file: PathBuf) -> Result<Vec<PathBuf>, Error> {
     if meta.is_file() {
         result.push(file);
     } else if meta.is_dir() {
-        let files: Vec<_> = fs::read_dir(&file)?
-            .map(|x| x.unwrap().path())
-            .collect();
+        let files: Vec<_> = fs::read_dir(&file)?.map(|x| x.unwrap().path()).collect();
 
         for f in files {
             let mut pathbuf = PathBuf::new();
@@ -276,10 +274,10 @@ fn main() -> Result<(), Error> {
     match app.cmd {
         OptCommand::List => {
             list_cmd(&db)?;
-        },
-        OptCommand::Add{files} => {
+        }
+        OptCommand::Add { files } => {
             add_files_cmd(&mut db, files)?;
-        },
+        }
     }
 
     Ok(())
