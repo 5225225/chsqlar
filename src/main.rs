@@ -4,6 +4,7 @@ use crypto::sha3::Sha3;
 use failure::Error;
 use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
+use std::env::current_dir;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -209,10 +210,10 @@ fn list_cmd(db: &Archive) -> Result<(), Error> {
     Ok(())
 }
 
-fn add_file(db: &mut Archive, fname: PathBuf) -> Result<(), Error> {
+fn add_file(db: &mut Archive, fpath: PathBuf, fname: PathBuf) -> Result<(), Error> {
     let mut buf = Vec::new();
-    fs::File::open(&fname)?.read_to_end(&mut buf)?;
-    let metadata = fs::metadata(&fname)?;
+    fs::File::open(&fpath)?.read_to_end(&mut buf)?;
+    let metadata = fs::metadata(&fpath)?;
 
     let f = File {
         name: fname.clone(),
@@ -225,6 +226,15 @@ fn add_file(db: &mut Archive, fname: PathBuf) -> Result<(), Error> {
     db.put_file_data(fname, buf)?;
 
     Ok(())
+}
+
+fn normalise_path<'a>(cwd: &'a Path, p: &'a Path) -> &'a Path {
+    cwd.ancestors()
+        .map(|x| p.strip_prefix(x))
+        .filter(|x| x.is_ok())
+        .next()
+        .unwrap()
+        .unwrap()
 }
 
 fn resolve_files(file: PathBuf) -> Result<Vec<PathBuf>, Error> {
@@ -256,10 +266,12 @@ fn resolve_files(file: PathBuf) -> Result<Vec<PathBuf>, Error> {
 }
 
 fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
+    let cwd = current_dir()?;
     for file in files.into_iter() {
         let resolved = resolve_files(file)?;
         for f in resolved {
-            add_file(db, f)?;
+            let normalised = normalise_path(&cwd, &f).to_path_buf();
+            add_file(db, f, normalised)?;
         }
     }
 
