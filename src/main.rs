@@ -290,7 +290,7 @@ fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), E
 
     fs::create_dir_all(file.parent().unwrap())?;
 
-    let mut f = fs::File::create(file)?;
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(file)?;
 
     f.write_all(&db_data);
 
@@ -308,7 +308,7 @@ fn extract_path(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
     dbg!(&files);
 
     for file in files {
-        extract_file(db, file.to_path_buf(), extract_to.clone());
+        extract_file(db, file.to_path_buf(), extract_to.clone())?;
     }
 
 
