@@ -6,7 +6,7 @@ use rusqlite::types::ToSql;
 use rusqlite::{Connection, NO_PARAMS};
 use std::env::current_dir;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use zstd::{decode_all, encode_all};
@@ -39,7 +39,7 @@ trait Archive {
     fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error>;
     fn get_file(&self, name: PathBuf) -> Result<File, Error>;
     fn put_file(&mut self, file: File) -> Result<(), Error>;
-    fn list_files(&self) -> Result<Vec<String>, Error>;
+    fn list_files(&self) -> Result<Vec<PathBuf>, Error>;
 
     fn put_file_data(&mut self, name: PathBuf, data: Vec<u8>) -> Result<(), Error> {
         let mut f = self.get_file(name)?;
@@ -193,13 +193,14 @@ impl Archive for SqliteDatabase {
         Ok(())
     }
 
-    fn list_files(&self) -> Result<Vec<String>, Error> {
+    fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
         let mut stmt = self.connection.prepare("SELECT name FROM files")?;
-        let mut results = Vec::new();
+        let mut results = Vec::<String>::new();
         for name in stmt.query_map(NO_PARAMS, |row| row.get(0))? {
             results.push(name?);
         }
-        Ok(results)
+
+        Ok(results.iter().map(PathBuf::from).collect())
     }
 }
 
@@ -207,7 +208,7 @@ fn list_cmd(db: &Archive) -> Result<(), Error> {
     let files = db.list_files()?;
 
     for file in files {
-        println!("{}", file);
+        println!("{}", file.to_str().unwrap());
     }
 
     Ok(())
@@ -281,18 +282,42 @@ fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
     Ok(())
 }
 
-fn extract_file(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
+fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), Error> {
+    dbg!((&file, &ex_to));
+    let db_file = db.get_file(file.clone());
 
-    let files = db.list_files()?;
+    let db_data = db.get_file_data(file.clone())?;
 
-    dbg!(files);
+    fs::create_dir_all(file.parent().unwrap())?;
+
+    let mut f = fs::File::create(file)?;
+
+    f.write_all(&db_data);
+
+    Ok(())
+}
+
+fn extract_path(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
+
+    let db_files = db.list_files()?;
+
+    let files: Vec<_> = db_files.iter().filter(|x| Path::new(x).starts_with(&file)).collect();
+
+    let extract_to = PathBuf::from(file.file_name().unwrap());
+
+    dbg!(&files);
+
+    for file in files {
+        extract_file(db, file.to_path_buf(), extract_to.clone());
+    }
+
 
     Ok(())
 }
 
 fn extract_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
     for file in files {
-        extract_file(db, file)?;
+        extract_path(db, file)?;
     }
 
     Ok(())
