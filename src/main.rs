@@ -31,6 +31,7 @@ struct CommonOpt {
 enum OptCommand {
     Add { files: Vec<PathBuf> },
     List,
+    Extract { files: Vec<PathBuf> },
 }
 
 trait Archive {
@@ -134,6 +135,8 @@ impl SqliteDatabase {
         ",
             NO_PARAMS,
         )?;
+
+        connection.execute("PRAGMA journal_mode=WAL;", NO_PARAMS);
 
         Ok(SqliteDatabase { connection })
     }
@@ -278,6 +281,23 @@ fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
     Ok(())
 }
 
+fn extract_file(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
+
+    let files = db.list_files()?;
+
+    dbg!(files);
+
+    Ok(())
+}
+
+fn extract_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
+    for file in files {
+        extract_file(db, file)?;
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Error> {
     let app = Opt::from_args();
 
@@ -289,6 +309,9 @@ fn main() -> Result<(), Error> {
         }
         OptCommand::Add { files } => {
             add_files_cmd(&mut db, files)?;
+        }
+        OptCommand::Extract {files } => {
+            extract_files_cmd(&mut db, files)?;
         }
     }
 
