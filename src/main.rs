@@ -282,35 +282,39 @@ fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
     Ok(())
 }
 
-fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), Error> {
-    dbg!((&file, &ex_to));
-    let db_file = db.get_file(file.clone());
+fn write_file_data_safe(fname: &Path, data: &[u8]) -> Result<(), Error> {
+    fs::create_dir_all(fname.parent().unwrap())?;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(fname)?;
+    f.write_all(&data)?;
+    Ok(())
+}
 
+fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), Error> {
     let db_data = db.get_file_data(file.clone())?;
 
-    fs::create_dir_all(file.parent().unwrap())?;
+    let par = ex_to.parent().unwrap();
 
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(file)?;
+    let common = file.strip_prefix(par).unwrap();
 
-    f.write_all(&db_data);
+    write_file_data_safe(common, &db_data)?;
 
     Ok(())
 }
 
 fn extract_path(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
-
     let db_files = db.list_files()?;
 
-    let files: Vec<_> = db_files.iter().filter(|x| Path::new(x).starts_with(&file)).collect();
+    let files: Vec<_> = db_files
+        .iter()
+        .filter(|x| Path::new(x).starts_with(&file))
+        .collect();
 
-    let extract_to = PathBuf::from(file.file_name().unwrap());
-
-    dbg!(&files);
-
-    for file in files {
-        extract_file(db, file.to_path_buf(), extract_to.clone())?;
+    for f in files {
+        extract_file(db, f.to_path_buf(), file.clone())?;
     }
-
 
     Ok(())
 }
@@ -335,7 +339,7 @@ fn main() -> Result<(), Error> {
         OptCommand::Add { files } => {
             add_files_cmd(&mut db, files)?;
         }
-        OptCommand::Extract {files } => {
+        OptCommand::Extract { files } => {
             extract_files_cmd(&mut db, files)?;
         }
     }
