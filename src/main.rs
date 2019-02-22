@@ -3,6 +3,8 @@ use crypto::digest::Digest;
 use crypto::sha3::Sha3;
 use failure::Error;
 use rusqlite::types::ToSql;
+use rusqlite::DropBehavior;
+use rusqlite::Transaction;
 use rusqlite::{Connection, NO_PARAMS};
 use std::env::current_dir;
 use std::fs;
@@ -32,72 +34,6 @@ enum OptCommand {
     Add { files: Vec<PathBuf> },
     List,
     Extract { files: Vec<PathBuf> },
-}
-
-trait Archive {
-    fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error>;
-    fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error>;
-    fn get_file(&self, name: PathBuf) -> Result<File, Error>;
-    fn put_file(&mut self, file: File) -> Result<(), Error>;
-    fn list_files(&self) -> Result<Vec<PathBuf>, Error>;
-
-    fn put_file_data(&mut self, name: PathBuf, data: Vec<u8>) -> Result<(), Error> {
-        let mut f = self.get_file(name)?;
-
-        let mut chunks = Vec::new();
-
-        for chunk in self.chunk_data(data) {
-            let hash = self.put_hash_chunk(chunk)?;
-            chunks.push(hash);
-        }
-
-        f.chunks = chunks;
-
-        self.put_file(f)?;
-
-        Ok(())
-    }
-
-    fn get_file_data(&mut self, name: PathBuf) -> Result<Vec<u8>, Error> {
-        let f = self.get_file(name)?;
-
-        let mut result = Vec::new();
-
-        for hash in f.chunks {
-            let chunk = self.get_chunk(&hash)?;
-            result.extend_from_slice(&chunk);
-        }
-
-        Ok(result)
-    }
-
-    fn chunk_data(&self, data: Vec<u8>) -> Vec<Vec<u8>> {
-        let chunker = Chunker::new(ZPAQ::new(20));
-
-        let mut chunks = Vec::new();
-
-        for chunk in chunker.slices(&data) {
-            chunks.push(chunk.to_owned());
-        }
-
-        chunks
-    }
-
-    fn hash_chunk(&self, data: &[u8]) -> String {
-        let mut hasher = Sha3::sha3_512();
-
-        hasher.input(&data);
-
-        hasher.result_str()
-    }
-
-    fn put_hash_chunk(&mut self, data: Vec<u8>) -> Result<String, Error> {
-        let hash = self.hash_chunk(&data);
-
-        self.put_chunk(hash.clone(), data)?;
-
-        Ok(hash)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,70 +78,130 @@ impl SqliteDatabase {
     }
 }
 
-impl Archive for SqliteDatabase {
-    fn get_chunk(&self, hash: &str) -> Result<Vec<u8>, Error> {
-        let data: Vec<u8> =
-            self.connection
-                .query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| {
-                    row.get(0)
-                })?;
+fn get_file_data(trans: &mut Transaction, name: PathBuf) -> Result<Vec<u8>, Error> {
+    let f = get_file(trans, name)?;
 
-        let decoded = decode_all(&*data)?;
-        Ok(decoded)
-    }
-    fn put_chunk(&mut self, hash: String, data: Vec<u8>) -> Result<(), Error> {
-        let compressed = encode_all(&*data, 0)?;
-        self.connection.execute(
-            "INSERT OR IGNORE INTO chunks VALUES (?,?)",
-            &[&hash, &compressed as &ToSql],
-        )?;
-        Ok(())
-    }
-    fn get_file(&self, name: PathBuf) -> Result<File, Error> {
-        let size: i64;
-        let chunks: String;
+    let mut result = Vec::new();
 
-        let result = self.connection.query_row(
-            "SELECT size, chunks FROM files WHERE name=?",
-            &[&name.to_str().unwrap()],
-            |row| (row.get(0), row.get(1)),
-        )?;
-
-        size = result.0;
-        chunks = result.1;
-
-        let chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
-
-        Ok(File {
-            name,
-            size,
-            chunks: chunks_vec,
-        })
-    }
-    fn put_file(&mut self, file: File) -> Result<(), Error> {
-        let chunks = file.chunks.join(";");
-
-        self.connection.execute(
-            "INSERT OR REPLACE INTO files VALUES (?,?,?)",
-            &[&file.name.to_str().unwrap() as &ToSql, &file.size, &chunks],
-        )?;
-
-        Ok(())
+    for hash in f.chunks {
+        let chunk = get_chunk(trans, &hash)?;
+        result.extend_from_slice(&chunk);
     }
 
-    fn list_files(&self) -> Result<Vec<PathBuf>, Error> {
-        let mut stmt = self.connection.prepare("SELECT name FROM files")?;
-        let mut results = Vec::<String>::new();
-        for name in stmt.query_map(NO_PARAMS, |row| row.get(0))? {
-            results.push(name?);
-        }
-
-        Ok(results.iter().map(PathBuf::from).collect())
-    }
+    Ok(result)
 }
 
-fn list_cmd(db: &Archive) -> Result<(), Error> {
-    let files = db.list_files()?;
+fn put_hash_chunk(trans: &mut Transaction, data: Vec<u8>) -> Result<String, Error> {
+    let hash = hash_chunk(&data);
+
+    put_chunk(trans, hash.clone(), data)?;
+
+    Ok(hash)
+}
+
+fn get_chunk(trans: &mut Transaction, hash: &str) -> Result<Vec<u8>, Error> {
+    let data: Vec<u8> =
+        trans.query_row("SELECT data FROM chunks WHERE hash=?", &[&hash], |row| {
+            row.get(0)
+        })?;
+
+    let decoded = decode_all(&*data)?;
+    Ok(decoded)
+}
+
+fn put_chunk(trans: &mut Transaction, hash: String, data: Vec<u8>) -> Result<(), Error> {
+    let compressed = encode_all(&*data, 0)?;
+    trans.execute(
+        "INSERT OR IGNORE INTO chunks VALUES (?,?)",
+        &[&hash, &compressed as &ToSql],
+    )?;
+    Ok(())
+}
+
+fn put_file(trans: &mut Transaction, file: File) -> Result<(), Error> {
+    let chunks = file.chunks.join(";");
+
+    trans.execute(
+        "INSERT OR REPLACE INTO files VALUES (?,?,?)",
+        &[&file.name.to_str().unwrap() as &ToSql, &file.size, &chunks],
+    )?;
+
+    Ok(())
+}
+
+fn list_files(trans: &mut Transaction) -> Result<Vec<PathBuf>, Error> {
+    let mut stmt = trans.prepare("SELECT name FROM files")?;
+    let mut results = Vec::<String>::new();
+    for name in stmt.query_map(NO_PARAMS, |row| row.get(0))? {
+        results.push(name?);
+    }
+
+    Ok(results.iter().map(PathBuf::from).collect())
+}
+
+fn chunk_data(data: Vec<u8>) -> Vec<Vec<u8>> {
+    let chunker = Chunker::new(ZPAQ::new(20));
+
+    let mut chunks = Vec::new();
+
+    for chunk in chunker.slices(&data) {
+        chunks.push(chunk.to_owned());
+    }
+
+    chunks
+}
+
+fn hash_chunk(data: &[u8]) -> String {
+    let mut hasher = Sha3::sha3_512();
+
+    hasher.input(&data);
+
+    hasher.result_str()
+}
+
+fn get_file(trans: &mut Transaction, name: PathBuf) -> Result<File, Error> {
+    let size: i64;
+    let chunks: String;
+
+    let result = trans.query_row(
+        "SELECT size, chunks FROM files WHERE name=?",
+        &[&name.to_str().unwrap()],
+        |row| (row.get(0), row.get(1)),
+    )?;
+
+    size = result.0;
+    chunks = result.1;
+
+    let chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
+
+    Ok(File {
+        name,
+        size,
+        chunks: chunks_vec,
+    })
+}
+
+fn put_file_data(trans: &mut Transaction, name: PathBuf, data: Vec<u8>) -> Result<(), Error> {
+    let mut f = get_file(trans, name)?;
+
+    let mut chunks = Vec::new();
+
+    for chunk in chunk_data(data) {
+        let hash = put_hash_chunk(trans, chunk)?;
+        chunks.push(hash);
+    }
+
+    f.chunks = chunks;
+
+    put_file(trans, f)?;
+
+    Ok(())
+}
+
+fn list_cmd(db: &mut SqliteDatabase) -> Result<(), Error> {
+    let mut trans = db.connection.transaction()?;
+
+    let files = list_files(&mut trans)?;
 
     for file in files {
         println!("{}", file.to_str().unwrap());
@@ -214,7 +210,7 @@ fn list_cmd(db: &Archive) -> Result<(), Error> {
     Ok(())
 }
 
-fn add_file(db: &mut Archive, fpath: PathBuf, fname: PathBuf) -> Result<(), Error> {
+fn add_file(trans: &mut Transaction, fpath: PathBuf, fname: PathBuf) -> Result<(), Error> {
     let mut buf = Vec::new();
     fs::File::open(&fpath)?.read_to_end(&mut buf)?;
     let metadata = fs::metadata(&fpath)?;
@@ -225,9 +221,9 @@ fn add_file(db: &mut Archive, fpath: PathBuf, fname: PathBuf) -> Result<(), Erro
         chunks: Vec::new(),
     };
 
-    db.put_file(f)?;
+    put_file(trans, f)?;
 
-    db.put_file_data(fname, buf)?;
+    put_file_data(trans, fname, buf)?;
 
     Ok(())
 }
@@ -269,13 +265,15 @@ fn resolve_files(file: PathBuf) -> Result<Vec<PathBuf>, Error> {
     Ok(result)
 }
 
-fn add_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
+fn add_files_cmd(db: &mut SqliteDatabase, files: Vec<PathBuf>) -> Result<(), Error> {
+    let mut trans = db.connection.transaction()?;
+
     let cwd = current_dir()?;
     for file in files.into_iter() {
         let resolved = resolve_files(file)?;
         for f in resolved {
             let normalised = normalise_path(&cwd, &f).to_path_buf();
-            add_file(db, f, normalised)?;
+            add_file(&mut trans, f, normalised)?;
         }
     }
 
@@ -292,8 +290,8 @@ fn write_file_data_safe(fname: &Path, data: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), Error> {
-    let db_data = db.get_file_data(file.clone())?;
+fn extract_file(trans: &mut Transaction, file: PathBuf, ex_to: PathBuf) -> Result<(), Error> {
+    let db_data = get_file_data(trans, file.clone())?;
 
     let par = ex_to.parent().unwrap();
 
@@ -304,8 +302,8 @@ fn extract_file(db: &mut Archive, file: PathBuf, ex_to: PathBuf) -> Result<(), E
     Ok(())
 }
 
-fn extract_path(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
-    let db_files = db.list_files()?;
+fn extract_path(trans: &mut Transaction, file: PathBuf) -> Result<(), Error> {
+    let db_files = list_files(trans)?;
 
     let files: Vec<_> = db_files
         .iter()
@@ -313,15 +311,16 @@ fn extract_path(db: &mut Archive, file: PathBuf) -> Result<(), Error> {
         .collect();
 
     for f in files {
-        extract_file(db, f.to_path_buf(), file.clone())?;
+        extract_file(trans, f.to_path_buf(), file.clone())?;
     }
 
     Ok(())
 }
 
-fn extract_files_cmd(db: &mut Archive, files: Vec<PathBuf>) -> Result<(), Error> {
+fn extract_files_cmd(db: &mut SqliteDatabase, files: Vec<PathBuf>) -> Result<(), Error> {
+    let mut trans = db.connection.transaction()?;
     for file in files {
-        extract_path(db, file)?;
+        extract_path(&mut trans, file)?;
     }
 
     Ok(())
@@ -334,7 +333,7 @@ fn main() -> Result<(), Error> {
 
     match app.cmd {
         OptCommand::List => {
-            list_cmd(&db)?;
+            list_cmd(&mut db)?;
         }
         OptCommand::Add { files } => {
             add_files_cmd(&mut db, files)?;
