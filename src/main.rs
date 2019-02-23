@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use cdchunking::{Chunker, ZPAQ};
 use crypto::digest::Digest;
 use crypto::sha3::Sha3;
@@ -41,6 +42,11 @@ struct File {
     name: PathBuf,
     size: i64,
     chunks: Vec<String>,
+}
+
+struct PreparedChunk {
+    hash: String,
+    data: Vec<u8>,
 }
 
 struct SqliteDatabase {
@@ -91,13 +97,6 @@ fn get_file_data(trans: &mut Transaction, name: PathBuf) -> Result<Vec<u8>, Erro
     Ok(result)
 }
 
-fn put_hash_chunk(trans: &mut Transaction, data: Vec<u8>) -> Result<String, Error> {
-    let hash = hash_chunk(&data);
-
-    put_chunk(trans, hash.clone(), data)?;
-
-    Ok(hash)
-}
 
 fn get_chunk(trans: &mut Transaction, hash: &str) -> Result<Vec<u8>, Error> {
     let data: Vec<u8> =
@@ -109,11 +108,10 @@ fn get_chunk(trans: &mut Transaction, hash: &str) -> Result<Vec<u8>, Error> {
     Ok(decoded)
 }
 
-fn put_chunk(trans: &mut Transaction, hash: String, data: Vec<u8>) -> Result<(), Error> {
-    let compressed = encode_all(&*data, 0)?;
+fn put_chunk(trans: &mut Transaction, chunk: PreparedChunk) -> Result<(), Error> {
     trans.execute(
         "INSERT OR IGNORE INTO chunks VALUES (?,?)",
-        &[&hash, &compressed as &ToSql],
+        &[&chunk.hash, &chunk.data as &ToSql],
     )?;
     Ok(())
 }
@@ -172,7 +170,13 @@ fn get_file(trans: &mut Transaction, name: PathBuf) -> Result<File, Error> {
     size = result.0;
     chunks = result.1;
 
-    let chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
+    let chunks_vec;
+
+    if chunks == "" {
+        chunks_vec = Vec::new();
+    } else {
+        chunks_vec = chunks.split(";").map(|s| s.to_string()).collect();
+    }
 
     Ok(File {
         name,
@@ -186,9 +190,16 @@ fn put_file_data(trans: &mut Transaction, name: PathBuf, data: Vec<u8>) -> Resul
 
     let mut chunks = Vec::new();
 
-    for chunk in chunk_data(data) {
-        let hash = put_hash_chunk(trans, chunk)?;
-        chunks.push(hash);
+    let hashed_chunks: Vec<_> = chunk_data(data).into_par_iter().map(|chunk| {
+        let hash = hash_chunk(&chunk);
+
+        PreparedChunk {data: encode_all(&*chunk, 0).unwrap(), hash: hash}
+    }).collect();
+
+    for pchunk in hashed_chunks {
+        chunks.push(pchunk.hash.to_string());
+
+        put_chunk(trans, pchunk)?;
     }
 
     f.chunks = chunks;
@@ -276,6 +287,8 @@ fn add_files_cmd(db: &mut SqliteDatabase, files: Vec<PathBuf>) -> Result<(), Err
             add_file(&mut trans, f, normalised)?;
         }
     }
+
+    trans.commit();
 
     Ok(())
 }
