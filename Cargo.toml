@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 rust-crypto = "^0.2"
 cdchunking = "0.2"
-rusqlite = "0.16"
+rusqlite = "0.23"
 zstd = "0.4"
 structopt = "0.2"
 failure = "0.1.5"
